@@ -7,6 +7,10 @@ taake sab kuch aik hi jagah khul jaye. Neeche pehle README aur
 requirements comments ke andar hain, uske baad asli Streamlit code
 shuru hota hai.
 
+IMPORTANT: Streamlit Cloud pe deploy karne ke liye, yeh requirements
+ek ALAG "requirements.txt" file mein bhi zaroor daalein (repo ke root
+mein, app file ke sath) — sirf is docstring mein likhna kaafi nahi.
+
 ================================================================
 README
 ================================================================
@@ -101,13 +105,8 @@ mediscan/
 ```
 
 ================================================================
-REQUIREMENTS (requirements.txt ki jagah - inko is tarah install karein)
+REQUIREMENTS (yeh lines ek alag requirements.txt file mein daalein)
 ================================================================
-pip install streamlit google-genai Pillow
-
-Ya agar requirements.txt file chahiye to yeh lines ek naye
-requirements.txt file mein paste kar dein:
-
 streamlit>=1.36.0
 google-genai>=1.0.0
 Pillow>=10.0.0
@@ -447,8 +446,26 @@ def extract_json_from_text(text: str) -> dict:
     if match:
         try:
             return json.loads(match.group(0))
-        except json.JSONDecodeError as e:
-            raise ValueError(f"Model returned malformed JSON: {e}")
+        except json.JSONDecodeError:
+            pass
+
+    # Last resort: the response may have been cut off mid-way (truncated).
+    # Try to repair it by trimming to the last complete field and closing
+    # any open strings/brackets, rather than failing outright.
+    try:
+        repaired = cleaned
+        # Trim trailing partial token/comma
+        repaired = re.sub(r",\s*$", "", repaired)
+        # If we're inside an unterminated string, close it
+        if repaired.count('"') % 2 != 0:
+            repaired += '"'
+        open_braces = repaired.count("{") - repaired.count("}")
+        open_brackets = repaired.count("[") - repaired.count("]")
+        repaired += "]" * max(open_brackets, 0)
+        repaired += "}" * max(open_braces, 0)
+        return json.loads(repaired)
+    except (json.JSONDecodeError, Exception):
+        pass
 
     raise ValueError("Could not locate a JSON object in the model's response.")
 
@@ -481,13 +498,27 @@ def call_gemini_vision(image: Image.Image, api_key: str) -> dict:
         config=genai_types.GenerateContentConfig(
             temperature=0.15,
             top_p=0.9,
-            max_output_tokens=2048,
+            max_output_tokens=8192,
             response_mime_type="application/json",
         ),
     )
 
     raw_text = response.text
     st.session_state.raw_response = raw_text
+
+    # Detect truncated output early (common cause of "invalid JSON" errors)
+    finish_reason = None
+    try:
+        finish_reason = response.candidates[0].finish_reason
+    except (AttributeError, IndexError, TypeError):
+        pass
+    if finish_reason is not None and str(finish_reason).upper().find("MAX_TOKENS") != -1:
+        raise ValueError(
+            "The AI's answer was cut off because it ran out of space (too many "
+            "medicines / too much text). Try again — the token limit has been "
+            "raised, or try a photo with fewer lines per shot."
+        )
+
     return extract_json_from_text(raw_text)
 
 
